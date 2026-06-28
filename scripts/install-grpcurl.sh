@@ -14,8 +14,12 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 if [[ -x "$TARGET" ]]; then
-  echo "$TARGET"
-  exit 0
+  if "$TARGET" -version >/dev/null 2>&1; then
+    echo "$TARGET"
+    exit 0
+  fi
+  echo "Removing incompatible grpcurl at $TARGET" >&2
+  rm -f "$TARGET"
 fi
 
 if command -v grpcurl >/dev/null 2>&1; then

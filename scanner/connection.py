@@ -335,19 +335,31 @@ def summarize_starlink_clients(
     }
 
 
+def _grpcurl_runs(path: str) -> bool:
+    try:
+        completed = subprocess.run(
+            [path, "-version"],
+            capture_output=True,
+            timeout=3,
+            check=False,
+        )
+        return completed.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def find_grpcurl() -> str | None:
     if PROJECT_GRPCURL.is_file():
-        if os.access(PROJECT_GRPCURL, os.X_OK):
-            return str(PROJECT_GRPCURL)
-        # Still usable via explicit path even if execute bit missing.
-        return str(PROJECT_GRPCURL)
+        path = str(PROJECT_GRPCURL)
+        if _grpcurl_runs(path):
+            return path
 
     found = shutil.which("grpcurl")
-    if found:
+    if found and _grpcurl_runs(found):
         return found
 
     for candidate in ("/usr/bin/grpcurl", "/usr/local/bin/grpcurl", "/snap/bin/grpcurl"):
-        if Path(candidate).is_file():
+        if Path(candidate).is_file() and _grpcurl_runs(candidate):
             return candidate
     return None
 
@@ -403,7 +415,7 @@ def _export_protoset(grpcurl: str, host: str, port: int, destination: Path, time
             timeout=timeout + 2,
             check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
         _log_starlink(f"protoset export exception for {host}:{port}: {exc}")
         return False
 
