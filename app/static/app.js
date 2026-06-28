@@ -4,7 +4,10 @@ const networkInfo = document.getElementById("network-info");
 const discoveryStatus = document.getElementById("discovery-status");
 const portStatus = document.getElementById("port-status");
 const scanNetworkBtn = document.getElementById("scan-network-btn");
+const stopDiscoveryBtn = document.getElementById("stop-discovery-btn");
+const restoreLastScanBtn = document.getElementById("restore-last-scan-btn");
 const scanPortsBtn = document.getElementById("scan-ports-btn");
+const stopPortScanBtn = document.getElementById("stop-port-scan-btn");
 const portScanForm = document.getElementById("port-scan-form");
 const targetHostInput = document.getElementById("target-host");
 const targetPortsPreset = document.getElementById("target-ports-preset");
@@ -45,6 +48,37 @@ const portProfileStatus = document.getElementById("port-profile-status");
 const loadPortProfileBtn = document.getElementById("load-port-profile-btn");
 const savePortProfileBtn = document.getElementById("save-port-profile-btn");
 const clearPortProfileBtn = document.getElementById("clear-port-profile-btn");
+const copyToast = document.getElementById("copy-toast");
+const themeToggleBtn = document.getElementById("theme-toggle");
+const autoRescanSelect = document.getElementById("auto-rescan-interval");
+const autoRescanStatus = document.getElementById("auto-rescan-status");
+const notifyNewDevicesCheckbox = document.getElementById("notify-new-devices");
+const notifyStatus = document.getElementById("notify-status");
+const topologyPanel = document.getElementById("topology-panel");
+const topologyView = document.getElementById("topology-view");
+const topologySubtitle = document.getElementById("topology-subtitle");
+const servicesStatus = document.getElementById("services-status");
+const servicesSummary = document.getElementById("services-summary");
+const certificatesBody = document.getElementById("certificates-body");
+const refreshServicesBtn = document.getElementById("refresh-services-btn");
+const serviceModal = document.getElementById("service-modal");
+const serviceModalBackdrop = document.getElementById("service-modal-backdrop");
+const serviceModalClose = document.getElementById("service-modal-close");
+const serviceModalTitle = document.getElementById("service-modal-title");
+const serviceModalRole = document.getElementById("service-modal-role");
+const serviceModalContent = document.getElementById("service-modal-content");
+const portModalCertWrap = document.getElementById("port-modal-cert-wrap");
+const portModalCertSubject = document.getElementById("port-modal-cert-subject");
+const portModalCertMeta = document.getElementById("port-modal-cert-meta");
+
+const UI_PREFS_KEY = "lan-network-scanner-ui";
+
+let uiPrefs = {
+  scrollToPortScanner: true,
+  theme: "dark",
+  autoRescanMinutes: 0,
+  notifyNewDevices: false,
+};
 
 let discoverySource = null;
 let portSource = null;
@@ -59,6 +93,12 @@ let lastScanSummary = null;
 let lastStarlinkSummary = null;
 let currentPortProfile = null;
 let selectedHostIp = null;
+let copyToastTimer = null;
+let lastScanAvailable = false;
+let autoRescanTimer = null;
+let autoRescanCountdownTimer = null;
+let autoRescanNextAt = null;
+let networkMeta = null;
 
 const CONNECTION_SORT_ORDER = {
   ethernet: 0,
@@ -74,9 +114,289 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
+function loadUiPrefs() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(UI_PREFS_KEY) || "{}");
+    if (stored.hostSort?.column) {
+      hostSort = {
+        column: stored.hostSort.column,
+        direction: stored.hostSort.direction === "desc" ? "desc" : "asc",
+      };
+    }
+    if (typeof stored.scrollToPortScanner === "boolean") {
+      uiPrefs.scrollToPortScanner = stored.scrollToPortScanner;
+    }
+    if (stored.theme === "light" || stored.theme === "dark") {
+      uiPrefs.theme = stored.theme;
+    }
+    if (Number.isFinite(stored.autoRescanMinutes)) {
+      uiPrefs.autoRescanMinutes = Math.max(0, Number(stored.autoRescanMinutes));
+    }
+    if (typeof stored.notifyNewDevices === "boolean") {
+      uiPrefs.notifyNewDevices = stored.notifyNewDevices;
+    }
+  } catch {
+    // Ignore invalid saved preferences.
+  }
+  applyTheme(uiPrefs.theme, false);
+  if (autoRescanSelect) {
+    autoRescanSelect.value = String(uiPrefs.autoRescanMinutes || 0);
+  }
+  if (notifyNewDevicesCheckbox) {
+    notifyNewDevicesCheckbox.checked = uiPrefs.notifyNewDevices;
+  }
+}
+
+function saveUiPrefs() {
+  try {
+    localStorage.setItem(
+      UI_PREFS_KEY,
+      JSON.stringify({
+        hostSort,
+        scrollToPortScanner: uiPrefs.scrollToPortScanner,
+        theme: uiPrefs.theme,
+        autoRescanMinutes: uiPrefs.autoRescanMinutes,
+        notifyNewDevices: uiPrefs.notifyNewDevices,
+      }),
+    );
+  } catch {
+    // Ignore storage errors (private browsing, quota, etc.).
+  }
+}
+
+function applyTheme(theme, persist = true) {
+  const resolved = theme === "light" ? "light" : "dark";
+  document.documentElement.dataset.theme = resolved;
+  uiPrefs.theme = resolved;
+  if (themeToggleBtn) {
+    themeToggleBtn.textContent = resolved === "light" ? "Dark mode" : "Light mode";
+    themeToggleBtn.setAttribute(
+      "aria-label",
+      resolved === "light" ? "Switch to dark mode" : "Switch to light mode",
+    );
+  }
+  if (persist) {
+    saveUiPrefs();
+  }
+}
+
+function toggleTheme() {
+  applyTheme(uiPrefs.theme === "light" ? "dark" : "light");
+}
+
+function clearAutoRescanTimers() {
+  if (autoRescanTimer) {
+    clearTimeout(autoRescanTimer);
+    autoRescanTimer = null;
+  }
+  if (autoRescanCountdownTimer) {
+    clearInterval(autoRescanCountdownTimer);
+    autoRescanCountdownTimer = null;
+  }
+  autoRescanNextAt = null;
+}
+
+function updateAutoRescanStatus() {
+  if (!autoRescanStatus) {
+    return;
+  }
+  const minutes = Number(uiPrefs.autoRescanMinutes) || 0;
+  if (!minutes) {
+    autoRescanStatus.textContent = "";
+    return;
+  }
+  if (discoverySource) {
+    autoRescanStatus.textContent = "Refresh after current scan";
+    return;
+  }
+  if (!autoRescanNextAt) {
+    autoRescanStatus.textContent = "";
+    return;
+  }
+  const remainingMs = Math.max(0, autoRescanNextAt - Date.now());
+  const remainingMin = Math.max(1, Math.ceil(remainingMs / 60000));
+  autoRescanStatus.textContent = `Next in ~${remainingMin} min`;
+}
+
+function scheduleAutoRescan() {
+  clearAutoRescanTimers();
+  const minutes = Number(uiPrefs.autoRescanMinutes) || 0;
+  if (!minutes) {
+    updateAutoRescanStatus();
+    return;
+  }
+
+  autoRescanNextAt = Date.now() + minutes * 60 * 1000;
+  autoRescanTimer = setTimeout(() => {
+    if (!discoverySource) {
+      startDiscoveryScan({ auto: true });
+    } else {
+      scheduleAutoRescan();
+    }
+  }, minutes * 60 * 1000);
+  autoRescanCountdownTimer = setInterval(updateAutoRescanStatus, 10000);
+  updateAutoRescanStatus();
+}
+
+function formatNewDeviceNotification() {
+  const newHosts = discoveredHosts.filter((host) => host.scan_change === "new");
+  if (!newHosts.length) {
+    return null;
+  }
+  const title =
+    newHosts.length === 1
+      ? "New device on network"
+      : `${newHosts.length} new devices on network`;
+  const lines = newHosts.slice(0, 5).map((host) => {
+    const label =
+      host.hostname && host.hostname !== "—"
+        ? host.hostname
+        : host.vendor || "Unknown device";
+    return `${host.ip} (${label})`;
+  });
+  if (newHosts.length > 5) {
+    lines.push(`+${newHosts.length - 5} more`);
+  }
+  return { title, body: lines.join("\n") };
+}
+
+async function notifyNewDevicesIfNeeded() {
+  if (!uiPrefs.notifyNewDevices) {
+    return;
+  }
+  if (!lastScanSummary || lastScanSummary.first_scan || !lastScanSummary.new_count) {
+    return;
+  }
+
+  const payload = formatNewDeviceNotification();
+  if (!payload) {
+    return;
+  }
+
+  if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+    new Notification(payload.title, {
+      body: payload.body,
+      tag: "lan-network-scanner-new-device",
+    });
+  }
+
+  try {
+    await fetch("/api/notify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    // Desktop notifications are optional.
+  }
+}
+
+async function updateNotifyStatus() {
+  if (!notifyStatus) {
+    return;
+  }
+  if (!uiPrefs.notifyNewDevices) {
+    notifyStatus.textContent = "";
+    return;
+  }
+
+  const channels = [];
+  if (typeof Notification !== "undefined") {
+    if (Notification.permission === "granted") {
+      channels.push("browser");
+    } else if (Notification.permission === "denied") {
+      channels.push("browser blocked");
+    }
+  }
+
+  try {
+    const response = await fetch("/api/notify/status");
+    if (response.ok) {
+      const data = await response.json();
+      if (data.available) {
+        channels.push("desktop");
+      }
+    }
+  } catch {
+    // Ignore status lookup errors.
+  }
+
+  if (!channels.length) {
+    notifyStatus.textContent = "Allow browser alerts or install notify-send";
+    return;
+  }
+  notifyStatus.textContent = `Via ${channels.join(" + ")}`;
+}
+
+async function enableDeviceNotifications() {
+  uiPrefs.notifyNewDevices = true;
+  if (notifyNewDevicesCheckbox) {
+    notifyNewDevicesCheckbox.checked = true;
+  }
+  saveUiPrefs();
+
+  if (typeof Notification !== "undefined" && Notification.permission === "default") {
+    await Notification.requestPermission();
+  }
+  await updateNotifyStatus();
+}
+
+function showCopyToast(message) {
+  if (!copyToast) {
+    return;
+  }
+  copyToast.textContent = message;
+  copyToast.classList.remove("hidden");
+  if (copyToastTimer) {
+    clearTimeout(copyToastTimer);
+  }
+  copyToastTimer = setTimeout(() => {
+    copyToast.classList.add("hidden");
+  }, 1600);
+}
+
+async function copyToClipboard(value, label = "Copied") {
+  const text = String(value ?? "").trim();
+  if (!text || text === "—") {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    showCopyToast(`${label}: ${text}`);
+  } catch {
+    window.prompt("Copy this value:", text);
+  }
+}
+
+function attachCopyableCell(cell, value, label) {
+  if (!cell || !value || value === "—") {
+    return;
+  }
+  cell.classList.add("copyable-cell");
+  cell.title = `Click to copy ${label}`;
+  cell.addEventListener("click", (event) => {
+    event.stopPropagation();
+    copyToClipboard(value, label);
+  });
+}
+
+function scrollToPortScannerPanel() {
+  if (!uiPrefs.scrollToPortScanner || !portScanForm) {
+    return;
+  }
+  portScanForm.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function looksLikeIpv4(query) {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(query);
+}
+
 function hostMatchesFilter(host, query) {
   if (!query) {
     return true;
+  }
+  if (looksLikeIpv4(query)) {
+    return String(host.ip || "").toLowerCase() === query;
   }
   const haystack = [
     host.ip,
@@ -358,6 +678,7 @@ async function loadNetworkInfo() {
   }
 
   const data = await response.json();
+  networkMeta = data;
   let badge = `${data.network} via ${data.interface} (${data.address})`;
   if (data.starlink?.available) {
     badge += ` · Starlink ${data.starlink.client_count} clients`;
@@ -385,6 +706,7 @@ async function loadNetworkInfo() {
   } else {
     setupNotice.classList.add("hidden");
   }
+  renderTopology();
 }
 
 function setStatus(element, message, className = "") {
@@ -392,18 +714,24 @@ function setStatus(element, message, className = "") {
   element.className = `status ${className}`.trim();
 }
 
-function clearHostsTable() {
+function clearHostsTable(options = {}) {
+  const { keepFilter = false, keepSelection = false } = options;
   discoveredHosts = [];
   hostsBody.innerHTML = "";
   hostCount = 0;
-  selectedHostIp = null;
+  if (!keepSelection) {
+    selectedHostIp = null;
+  }
   lastScanSummary = null;
-  hostFilterQuery = "";
-  if (hostsFilterInput) {
-    hostsFilterInput.value = "";
+  if (!keepFilter) {
+    hostFilterQuery = "";
+    if (hostsFilterInput) {
+      hostsFilterInput.value = "";
+    }
   }
   renderDiscoverySummary(null);
   updateHostsToolbar();
+  renderTopology();
 }
 
 function compareIpAddress(left, right) {
@@ -506,6 +834,7 @@ function renderHostsTable() {
   sortedHosts.forEach((host) => {
     hostsBody.appendChild(createHostRow(host));
   });
+  renderTopology();
 }
 
 function setHostSort(column) {
@@ -515,10 +844,113 @@ function setHostSort(column) {
     hostSort.column = column;
     hostSort.direction = column === "ip" ? "asc" : "asc";
   }
+  saveUiPrefs();
   updateHostSortHeaders();
   if (discoveredHosts.length > 0) {
     renderHostsTable();
   }
+}
+
+function updateRestoreButton() {
+  if (!restoreLastScanBtn) {
+    return;
+  }
+  const canRestore = lastScanAvailable && discoveredHosts.length === 0;
+  restoreLastScanBtn.classList.toggle("hidden", !canRestore);
+  restoreLastScanBtn.disabled = !canRestore;
+}
+
+async function checkLastScanAvailable() {
+  try {
+    const response = await fetch("/api/scan/last");
+    if (!response.ok) {
+      lastScanAvailable = false;
+      updateRestoreButton();
+      return;
+    }
+    const data = await response.json();
+    lastScanAvailable = Boolean(data.available && data.hosts?.length);
+    updateRestoreButton();
+  } catch {
+    lastScanAvailable = false;
+    updateRestoreButton();
+  }
+}
+
+function restoreHostsFromPayload(hosts, summary) {
+  discoveredHosts = hosts.map((host) => ({ ...host }));
+  lastScanSummary = summary || null;
+  hostFilterQuery = "";
+  if (hostsFilterInput) {
+    hostsFilterInput.value = "";
+  }
+  renderHostsTable();
+  renderDiscoverySummary(lastScanSummary);
+  updateHostsToolbar();
+  if (selectedHostIp && !discoveredHosts.some((host) => host.ip === selectedHostIp)) {
+    selectedHostIp = null;
+  }
+}
+
+async function restoreLastScan() {
+  if (!lastScanAvailable || discoveredHosts.length > 0) {
+    return;
+  }
+
+  restoreLastScanBtn.disabled = true;
+  try {
+    const response = await fetch("/api/scan/last");
+    if (!response.ok) {
+      throw new Error("Could not load last scan");
+    }
+    const data = await response.json();
+    if (!data.available || !data.hosts?.length) {
+      lastScanAvailable = false;
+      updateRestoreButton();
+      setStatus(discoveryStatus, "No saved scan to restore.", "error");
+      return;
+    }
+
+    restoreHostsFromPayload(data.hosts, data.summary);
+    const when = data.scanned_at ? ` from ${data.scanned_at}` : "";
+    setStatus(
+      discoveryStatus,
+      `Restored ${data.hosts.length} host${data.hosts.length === 1 ? "" : "s"}${when}. Run Scan Network for fresh results.`,
+      "done",
+    );
+  } catch {
+    setStatus(discoveryStatus, "Could not restore last scan.", "error");
+  } finally {
+    updateRestoreButton();
+  }
+}
+
+function cancelDiscoveryScan(message = "Discovery scan stopped.") {
+  if (discoverySource) {
+    discoverySource.close();
+    discoverySource = null;
+  }
+  scanNetworkBtn.disabled = false;
+  stopDiscoveryBtn.classList.add("hidden");
+  setStatus(discoveryStatus, message, discoveredHosts.length ? "done" : "");
+  scheduleAutoRescan();
+}
+
+function cancelPortScan(message = "Port scan stopped.") {
+  if (portSource) {
+    portSource.close();
+    portSource = null;
+  }
+  scanPortsBtn.disabled = false;
+  stopPortScanBtn.classList.add("hidden");
+  const host = targetHostInput.value.trim();
+  setStatus(
+    portStatus,
+    openPortCount
+      ? `${message} ${openPortCount} open port${openPortCount === 1 ? "" : "s"} found on ${host}.`
+      : message,
+    openPortCount ? "done" : "",
+  );
 }
 
 function clearPortsTable() {
@@ -528,19 +960,164 @@ function clearPortsTable() {
 }
 
 function formatServices(host) {
-  if (host.device_role) {
-    const title = host.mdns_services?.length
-      ? ` title="${host.mdns_services
-          .map((service) => {
-            const source = service.source || service.name || "mdns";
-            return `${service.hint} (${source})`;
-          })
-          .join(" · ")
-          .replaceAll('"', "&quot;")}"`
-      : "";
-    return `<span class="service-hint"${title}>${escapeHtml(host.device_role)}</span>`;
+  if (!host.device_role) {
+    return '<span class="service-hint missing">—</span>';
   }
-  return '<span class="service-hint missing">—</span>';
+  const title = host.mdns_services?.length
+    ? host.mdns_services
+        .map((service) => {
+          const source = service.source || service.name || "mdns";
+          return `${service.hint} (${source})`;
+        })
+        .join(" · ")
+        .replaceAll('"', "&quot;")
+    : "";
+  return `<button type="button" class="service-hint service-hint-button" data-host-ip="${escapeHtml(host.ip)}" title="${title}">${escapeHtml(host.device_role)}</button>`;
+}
+
+async function refreshServicesPanel() {
+  if (!certificatesBody) {
+    return;
+  }
+
+  try {
+    const [graphResponse, certResponse] = await Promise.all([
+      fetch("/api/services/graph"),
+      fetch("/api/certificates"),
+    ]);
+
+    if (graphResponse.ok) {
+      const graph = await graphResponse.json();
+      const withApps = (graph.hosts || []).filter((item) => item.applications?.length);
+      if (servicesSummary) {
+        servicesSummary.innerHTML = `
+          <span><strong>${graph.host_count || 0}</strong> hosts in graph</span>
+          <span><strong>${withApps.length}</strong> with scanned applications</span>
+        `;
+      }
+      if (servicesStatus && withApps.length) {
+        setStatus(
+          servicesStatus,
+          `${withApps.length} host${withApps.length === 1 ? "" : "s"} with application-layer data. Click Services in the table for details.`,
+          "done",
+        );
+      }
+    }
+
+    if (certResponse.ok) {
+      const data = await certResponse.json();
+      renderCertificatesTable(data.certificates || []);
+    }
+  } catch {
+    if (servicesStatus) {
+      setStatus(servicesStatus, "Could not load service graph.", "error");
+    }
+  }
+}
+
+function renderCertificatesTable(certificates) {
+  if (!certificates.length) {
+    certificatesBody.innerHTML = `
+      <tr class="empty-row">
+        <td colspan="6">No TLS certificates collected yet. Scan HTTPS ports on a host.</td>
+      </tr>
+    `;
+    return;
+  }
+
+  certificatesBody.innerHTML = certificates
+    .map((cert) => {
+      const match =
+        cert.hostname_match === true
+          ? "Yes"
+          : cert.hostname_match === false
+            ? "Mismatch"
+            : "—";
+      const expired = cert.expired ? '<span class="cert-expired">Expired</span>' : "";
+      return `
+        <tr>
+          <td class="mono">${escapeHtml(cert.host)}</td>
+          <td class="mono">${escapeHtml(cert.port)}</td>
+          <td>${escapeHtml(cert.subject || "—")}</td>
+          <td>${escapeHtml(cert.issuer || "—")}</td>
+          <td>${escapeHtml(cert.not_after || "—")} ${expired}</td>
+          <td>${match}</td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+function openServiceModalError(hostIp, message) {
+  if (!serviceModal) {
+    return;
+  }
+  serviceModalTitle.textContent = `Services on ${hostIp}`;
+  serviceModalRole.textContent = message;
+  serviceModalContent.innerHTML =
+    "<p class='muted'>Try running Scan Network or port-scanning this host, then open Services again.</p>";
+  serviceModal.classList.remove("hidden");
+  serviceModal.setAttribute("aria-hidden", "false");
+}
+
+async function showHostServiceGraph(hostIp) {
+  if (!serviceModal) {
+    return;
+  }
+  try {
+    const response = await fetch(`/api/hosts/${encodeURIComponent(hostIp)}/service-graph`);
+    if (!response.ok) {
+      let detail = `Could not load services (${response.status}).`;
+      try {
+        const data = await response.json();
+        if (data.detail) {
+          detail = String(data.detail);
+        }
+      } catch {
+        // Use default message.
+      }
+      openServiceModalError(hostIp, detail);
+      return;
+    }
+    const graph = await response.json();
+    serviceModalTitle.textContent = `Services on ${hostIp}`;
+    serviceModalRole.textContent = graph.role || "No service summary yet.";
+    const serviceList = (graph.services || [])
+      .map(
+        (service) =>
+          `<li><strong>${escapeHtml(service.label)}</strong> <span class="muted">(${escapeHtml(service.source)})</span></li>`,
+      )
+      .join("");
+    const appList = (graph.applications || [])
+      .map((app) => {
+        const proto = (app.protocol || "tcp").toUpperCase();
+        const detail = app.banner || app.probe?.summary || app.service || app.state || "";
+        return `<li><span class="mono">${proto} ${escapeHtml(app.port)}</span> — ${escapeHtml(detail || "open")}</li>`;
+      })
+      .join("");
+    serviceModalContent.innerHTML = `
+      <div class="service-modal-section">
+        <span class="modal-label">Discovered services</span>
+        <ul class="service-modal-list">${serviceList || "<li class='muted'>None yet — run Scan Network or port-scan this host.</li>"}</ul>
+      </div>
+      <div class="service-modal-section">
+        <span class="modal-label">Applications (from port scans)</span>
+        <ul class="service-modal-list">${appList || "<li class='muted'>Port-scan this host for HTTP titles, TLS certs, and UDP services.</li>"}</ul>
+      </div>
+    `;
+    serviceModal.classList.remove("hidden");
+    serviceModal.setAttribute("aria-hidden", "false");
+  } catch {
+    openServiceModalError(hostIp, "Could not load service graph.");
+  }
+}
+
+function closeServiceModal() {
+  if (!serviceModal) {
+    return;
+  }
+  serviceModal.classList.add("hidden");
+  serviceModal.setAttribute("aria-hidden", "true");
 }
 
 function applyServiceDataToHost(hostIp, data) {
@@ -589,13 +1166,203 @@ function formatConnection(host) {
   return `<span class="connection-badge${cssClass}"${title}>${label}</span>`;
 }
 
-function setSelectedHost(ip) {
+function guessGatewayIp(networkCidr) {
+  if (!networkCidr) {
+    return null;
+  }
+  const base = String(networkCidr).split("/")[0];
+  const parts = base.split(".").map((part) => parseInt(part, 10));
+  if (parts.length !== 4 || parts.some((part) => Number.isNaN(part))) {
+    return null;
+  }
+  parts[3] = 1;
+  return parts.join(".");
+}
+
+function findGatewayHost(hosts, gatewayIp) {
+  const candidates = [gatewayIp, "192.168.1.1", "192.168.0.1", "10.0.0.1"].filter(Boolean);
+  for (const ip of candidates) {
+    const host = hosts.find((item) => item.ip === ip);
+    if (host) {
+      return host;
+    }
+  }
+  return (
+    hosts.find((host) =>
+      /router|gateway|starlink|netgear|tp-link|tplink|asus|synology|unifi|eero|linksys/i.test(
+        String(host.vendor || ""),
+      ),
+    ) || null
+  );
+}
+
+function topologyNodeLabel(host) {
+  const name = host.hostname && host.hostname !== "—" ? host.hostname : host.ip;
+  const sub =
+    host.hostname && host.hostname !== "—"
+      ? host.ip
+      : host.vendor && host.vendor !== "—"
+        ? host.vendor
+        : "";
+  return { name, sub };
+}
+
+function renderTopologyNode(host, role) {
+  const { name, sub } = topologyNodeLabel(host);
+  const classes = [
+    "topology-node",
+    `topology-node-${role}`,
+    host.ip === selectedHostIp ? "selected" : "",
+    host.is_local ? "local" : "",
+    host.scan_change === "new" ? "novel" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return `
+    <button type="button" class="${classes}" data-host-ip="${escapeHtml(host.ip)}" title="${escapeHtml(host.ip)}">
+      <span class="topology-node-name">${escapeHtml(name)}</span>
+      ${sub ? `<span class="topology-node-sub">${escapeHtml(sub)}</span>` : ""}
+      ${host.scan_change === "new" ? '<span class="topology-node-badge">New</span>' : ""}
+    </button>
+  `;
+}
+
+function renderGatewayNode(gatewayHost, gatewayIp, label) {
+  if (gatewayHost) {
+    return renderTopologyNode(gatewayHost, "gateway");
+  }
+  return `
+    <div class="topology-node topology-node-gateway topology-node-ghost">
+      <span class="topology-node-name">${escapeHtml(label)}</span>
+      <span class="topology-node-sub">${escapeHtml(gatewayIp || "Not seen in scan")}</span>
+    </div>
+  `;
+}
+
+function renderTopologyBranch(title, kind, hosts) {
+  if (!hosts.length) {
+    return "";
+  }
+  const nodes = hosts.map((host) => renderTopologyNode(host, kind)).join("");
+  return `
+    <div class="topology-branch topology-branch-${kind}">
+      <div class="topology-branch-head">${escapeHtml(title)} · ${hosts.length}</div>
+      <div class="topology-branch-nodes">${nodes}</div>
+    </div>
+  `;
+}
+
+function renderTopology() {
+  if (!topologyPanel || !topologyView) {
+    return;
+  }
+
+  if (!discoveredHosts.length) {
+    topologyPanel.classList.add("hidden");
+    topologyView.innerHTML = "";
+    return;
+  }
+
+  topologyPanel.classList.remove("hidden");
+  if (topologySubtitle) {
+    topologySubtitle.textContent = networkMeta?.network || "Local network";
+  }
+
+  const gatewayIp = guessGatewayIp(networkMeta?.network);
+  const gatewayHost = findGatewayHost(discoveredHosts, gatewayIp);
+  const localHost = discoveredHosts.find((host) => host.is_local);
+  const clients = discoveredHosts.filter((host) => {
+    if (host.is_local) {
+      return false;
+    }
+    if (gatewayHost && host.ip === gatewayHost.ip) {
+      return false;
+    }
+    if (!gatewayHost && gatewayIp && host.ip === gatewayIp) {
+      return false;
+    }
+    return true;
+  });
+
+  const wifiHosts = clients.filter((host) => host.connection === "wifi");
+  const ethernetHosts = clients.filter((host) => host.connection === "ethernet");
+  const unknownHosts = clients.filter(
+    (host) => host.connection !== "wifi" && host.connection !== "ethernet",
+  );
+
+  const gatewayLabel = lastStarlinkSummary?.available ? "Starlink router" : "Gateway";
+  const centerBranch = localHost
+    ? `
+      <div class="topology-branch topology-branch-center">
+        <div class="topology-branch-head">This machine</div>
+        <div class="topology-branch-nodes">${renderTopologyNode(localHost, "local")}</div>
+      </div>
+    `
+    : "";
+
+  topologyView.innerHTML = `
+    <div class="topology-layout">
+      <div class="topology-hub">
+        ${renderGatewayNode(gatewayHost, gatewayIp, gatewayLabel)}
+      </div>
+      <div class="topology-spine" aria-hidden="true"></div>
+      <div class="topology-branches">
+        ${renderTopologyBranch("Wi-Fi", "wifi", wifiHosts)}
+        ${centerBranch}
+        ${renderTopologyBranch("Ethernet", "ethernet", ethernetHosts)}
+        ${renderTopologyBranch("Unknown", "unknown", unknownHosts)}
+      </div>
+    </div>
+  `;
+
+  topologyView.querySelectorAll(".topology-node[data-host-ip]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setSelectedHost(button.dataset.hostIp);
+    });
+  });
+}
+
+function scrollTopologyToSelectedHost() {
+  if (!topologyView || !selectedHostIp) {
+    return;
+  }
+
+  requestAnimationFrame(() => {
+    const node = topologyView.querySelector(
+      `.topology-node.selected[data-host-ip="${selectedHostIp}"]`,
+    );
+    if (!node) {
+      return;
+    }
+
+    const branch = node.closest(".topology-branch-nodes");
+    if (branch && branch.scrollHeight > branch.clientHeight + 1) {
+      const top = node.offsetTop - (branch.clientHeight - node.offsetHeight) / 2;
+      branch.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+    }
+
+    node.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+  });
+}
+
+function setSelectedHost(ip, options = {}) {
+  const { scroll = false } = options;
+  const selectionChanged = selectedHostIp !== ip;
+  const scrollTopology = options.scrollTopology ?? !scroll;
   selectedHostIp = ip;
   hostsBody.querySelectorAll("tr[data-host-ip]").forEach((row) => {
     row.classList.toggle("selected-host", row.dataset.hostIp === ip);
   });
   targetHostInput.value = ip;
   refreshPortProfileUi(ip, true);
+  if (scroll) {
+    scrollToPortScannerPanel();
+  }
+  renderTopology();
+  if (scrollTopology && selectionChanged) {
+    scrollTopologyToSelectedHost();
+  }
 }
 
 function createHostRow(host) {
@@ -623,8 +1390,8 @@ function createHostRow(host) {
     : "";
 
   row.innerHTML = `
-    <td>${host.ip}${localBadge}${newBadge}</td>
-    <td class="mono col-mac">${mac}</td>
+    <td class="copyable-host-ip">${host.ip}${localBadge}${newBadge}</td>
+    <td class="mono col-mac copyable-host-mac">${mac}</td>
     <td class="col-vendor">${vendor}${methodBadge}</td>
     <td class="col-hostname">${hostname}</td>
     <td>${services}</td>
@@ -634,18 +1401,38 @@ function createHostRow(host) {
     <td><button type="button" class="secondary scan-host-btn" data-host="${host.ip}">Scan ports</button></td>
   `;
 
+  attachCopyableCell(row.querySelector(".copyable-host-ip"), host.ip, "IP");
+  attachCopyableCell(row.querySelector(".copyable-host-mac"), host.mac, "MAC");
+
   row.addEventListener("click", (event) => {
-    if (event.target.closest(".scan-host-btn")) {
+    if (event.target.closest(".scan-host-btn, .copyable-cell")) {
       return;
     }
     setSelectedHost(host.ip);
   });
 
-  row.querySelector(".scan-host-btn").addEventListener("click", (event) => {
-    event.stopPropagation();
-    setSelectedHost(host.ip);
+  row.addEventListener("dblclick", (event) => {
+    if (event.target.closest(".copyable-cell")) {
+      return;
+    }
+    setSelectedHost(host.ip, { scroll: true });
     startPortScan(host.ip, getSelectedPorts());
   });
+
+  row.querySelector(".scan-host-btn").addEventListener("click", (event) => {
+    event.stopPropagation();
+    setSelectedHost(host.ip, { scroll: true });
+    startPortScan(host.ip, getSelectedPorts());
+  });
+
+  const serviceButton = row.querySelector(".service-hint-button");
+  if (serviceButton) {
+    serviceButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setSelectedHost(host.ip);
+      showHostServiceGraph(host.ip);
+    });
+  }
 
   return row;
 }
@@ -673,19 +1460,27 @@ function addPortRow(result) {
   const row = document.createElement("tr");
   row.classList.add("port-row");
   row.dataset.port = String(result.port);
+  const protocol = result.protocol === "udp" ? "UDP" : "TCP";
+  const monitorCell =
+    result.protocol === "udp"
+      ? '<span class="muted">—</span>'
+      : '<button type="button" class="secondary monitor-port-btn">Monitor</button>';
   row.innerHTML = `
-    <td class="port-cell mono">${result.port}</td>
+    <td class="port-cell mono">${protocol} ${result.port}</td>
     <td>${result.service}</td>
     <td>${formatPortBanner(result.banner)}</td>
     <td>${result.state}</td>
-    <td><button type="button" class="secondary monitor-port-btn">Monitor</button></td>
+    <td>${monitorCell}</td>
   `;
 
   row.addEventListener("dblclick", () => showPortInfo(result));
-  row.querySelector(".monitor-port-btn").addEventListener("click", (event) => {
-    event.stopPropagation();
-    startPortMonitor(result);
-  });
+  const monitorBtn = row.querySelector(".monitor-port-btn");
+  if (monitorBtn) {
+    monitorBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      startPortMonitor(result);
+    });
+  }
   portsBody.appendChild(row);
 }
 
@@ -847,7 +1642,8 @@ function renderConnectOptions(host, port, service) {
 
 function showPortInfo(result) {
   const host = targetHostInput.value.trim();
-  portModalTitle.textContent = `Port ${result.port}`;
+  const protocol = result.protocol === "udp" ? "UDP" : "TCP";
+  portModalTitle.textContent = `${protocol} ${result.port}`;
   portModalService.textContent = result.service && result.service !== "unknown"
     ? result.service
     : "Unknown service";
@@ -861,6 +1657,29 @@ function showPortInfo(result) {
     portModalBannerWrap.classList.add("hidden");
     portModalBanner.textContent = "";
   }
+
+  const cert = result.certificate || result.probe;
+  if (portModalCertWrap && cert?.protocol === "tls" && cert.subject) {
+    portModalCertWrap.classList.remove("hidden");
+    portModalCertSubject.textContent = cert.subject;
+    const meta = [
+      cert.issuer ? `Issuer: ${cert.issuer}` : "",
+      cert.not_after ? `Expires: ${cert.not_after}` : "",
+      cert.expired ? "Status: expired" : "",
+      cert.hostname_match === false ? "Hostname mismatch" : "",
+      cert.san?.length ? `SAN: ${cert.san.join(", ")}` : "",
+    ].filter(Boolean);
+    portModalCertMeta.textContent = meta.join(" · ");
+  } else if (portModalCertWrap) {
+    portModalCertWrap.classList.add("hidden");
+    if (portModalCertSubject) {
+      portModalCertSubject.textContent = "";
+    }
+    if (portModalCertMeta) {
+      portModalCertMeta.textContent = "";
+    }
+  }
+
   renderConnectOptions(host, result.port, result.service);
   portModal.classList.remove("hidden");
   portModal.setAttribute("aria-hidden", "false");
@@ -1011,40 +1830,76 @@ portMonitorStopBtn.addEventListener("click", () => stopPortMonitor(true));
 
 portModalClose.addEventListener("click", closePortModal);
 portModalBackdrop.addEventListener("click", closePortModal);
+if (serviceModalClose) {
+  serviceModalClose.addEventListener("click", closeServiceModal);
+}
+if (serviceModalBackdrop) {
+  serviceModalBackdrop.addEventListener("click", closeServiceModal);
+}
+if (refreshServicesBtn) {
+  refreshServicesBtn.addEventListener("click", refreshServicesPanel);
+}
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !portModal.classList.contains("hidden")) {
     closePortModal();
+  }
+  if (event.key === "Escape" && serviceModal && !serviceModal.classList.contains("hidden")) {
+    closeServiceModal();
   }
 });
 
 function consumeEventStream(url, onEvent, onDone, onError) {
   const source = new EventSource(url);
+  let intentionalClose = false;
+
+  const handle = {
+    close() {
+      intentionalClose = true;
+      source.close();
+    },
+    source,
+  };
 
   source.onmessage = (event) => {
     const payload = JSON.parse(event.data);
     onEvent(payload);
     if (payload.type === "done") {
+      intentionalClose = true;
       source.close();
       onDone();
     }
   };
 
   source.onerror = () => {
+    if (intentionalClose) {
+      return;
+    }
     source.close();
     onError();
   };
 
-  return source;
+  return handle;
 }
 
-function startDiscoveryScan() {
+function startDiscoveryScan(options = {}) {
+  const { auto = false } = options;
   if (discoverySource) {
     discoverySource.close();
   }
 
-  clearHostsTable();
+  const previousSelection = selectedHostIp;
+  clearHostsTable({ keepFilter: auto, keepSelection: auto });
+  if (auto && previousSelection) {
+    selectedHostIp = previousSelection;
+  }
+
   scanNetworkBtn.disabled = true;
-  setStatus(discoveryStatus, "Scanning local network for active hosts...", "scanning");
+  stopDiscoveryBtn.classList.remove("hidden");
+  const statusPrefix = auto
+    ? "Auto-refresh: scanning local network..."
+    : "Scanning local network for active hosts...";
+  setStatus(discoveryStatus, statusPrefix, "scanning");
+  updateAutoRescanStatus();
 
   discoverySource = consumeEventStream(
     "/api/scan/discovery",
@@ -1059,6 +1914,7 @@ function startDiscoveryScan() {
         if (payload.starlink) {
           renderStarlinkPanel(payload.starlink);
         }
+        renderTopology();
         return;
       }
       if (payload.type === "host") {
@@ -1071,7 +1927,14 @@ function startDiscoveryScan() {
       }
     },
     () => {
+      discoverySource = null;
       scanNetworkBtn.disabled = false;
+      stopDiscoveryBtn.classList.add("hidden");
+      lastScanAvailable = true;
+      updateRestoreButton();
+      if (selectedHostIp && discoveredHosts.some((host) => host.ip === selectedHostIp)) {
+        setSelectedHost(selectedHostIp);
+      }
       let message = hostCount
         ? `Discovery complete. Found ${hostCount} active host${hostCount === 1 ? "" : "s"}.`
         : "Discovery complete. No active hosts responded.";
@@ -1084,9 +1947,14 @@ function startDiscoveryScan() {
         message += ` ${lastScanSummary.disappeared.length} no longer seen.`;
       }
       setStatus(discoveryStatus, message, "done");
+      notifyNewDevicesIfNeeded();
+      scheduleAutoRescan();
+      refreshServicesPanel();
     },
     () => {
+      discoverySource = null;
       scanNetworkBtn.disabled = false;
+      stopDiscoveryBtn.classList.add("hidden");
       setStatus(discoveryStatus, "Discovery scan failed.", "error");
     },
   );
@@ -1251,6 +2119,7 @@ function startPortScan(host, ports) {
 
   clearPortsTable();
   scanPortsBtn.disabled = true;
+  stopPortScanBtn.classList.remove("hidden");
   const normalizedPorts = portSpec.toLowerCase();
   const scanningAll = normalizedPorts === "all" || normalizedPorts === "full" || normalizedPorts === "1-65535";
   const statusPrefix = scanningAll
@@ -1281,7 +2150,9 @@ function startPortScan(host, ports) {
       }
     },
     () => {
+      portSource = null;
       scanPortsBtn.disabled = false;
+      stopPortScanBtn.classList.add("hidden");
       refreshHostServices(host);
       setStatus(
         portStatus,
@@ -1290,15 +2161,42 @@ function startPortScan(host, ports) {
           : `Port scan complete. No open ports found on ${host}.`,
         "done",
       );
+      refreshServicesPanel();
     },
     () => {
+      portSource = null;
       scanPortsBtn.disabled = false;
+      stopPortScanBtn.classList.add("hidden");
       setStatus(portStatus, "Port scan failed.", "error");
     },
   );
 }
 
-scanNetworkBtn.addEventListener("click", startDiscoveryScan);
+scanNetworkBtn.addEventListener("click", () => startDiscoveryScan());
+stopDiscoveryBtn.addEventListener("click", () => cancelDiscoveryScan());
+restoreLastScanBtn.addEventListener("click", restoreLastScan);
+stopPortScanBtn.addEventListener("click", () => cancelPortScan());
+themeToggleBtn.addEventListener("click", toggleTheme);
+
+if (autoRescanSelect) {
+  autoRescanSelect.addEventListener("change", () => {
+    uiPrefs.autoRescanMinutes = Number(autoRescanSelect.value) || 0;
+    saveUiPrefs();
+    scheduleAutoRescan();
+  });
+}
+
+if (notifyNewDevicesCheckbox) {
+  notifyNewDevicesCheckbox.addEventListener("change", async () => {
+    if (notifyNewDevicesCheckbox.checked) {
+      await enableDeviceNotifications();
+      return;
+    }
+    uiPrefs.notifyNewDevices = false;
+    saveUiPrefs();
+    await updateNotifyStatus();
+  });
+}
 
 document.querySelectorAll("th.sortable[data-sort]").forEach((header) => {
   header.addEventListener("click", () => {
@@ -1317,10 +2215,18 @@ exportHostsCsvBtn.addEventListener("click", exportHostsCsv);
 exportHostsJsonBtn.addEventListener("click", exportHostsJson);
 
 targetHostInput.addEventListener("input", () => {
-  refreshPortProfileUi(targetHostInput.value.trim());
+  const ip = targetHostInput.value.trim();
+  refreshPortProfileUi(ip);
+  if (ip && discoveredHosts.some((host) => host.ip === ip)) {
+    setSelectedHost(ip);
+  }
 });
 targetHostInput.addEventListener("change", () => {
-  refreshPortProfileUi(targetHostInput.value.trim(), true);
+  const ip = targetHostInput.value.trim();
+  refreshPortProfileUi(ip, true);
+  if (ip && discoveredHosts.some((host) => host.ip === ip)) {
+    setSelectedHost(ip);
+  }
 });
 loadPortProfileBtn.addEventListener("click", () => {
   if (currentPortProfile?.ports) {
@@ -1331,11 +2237,20 @@ loadPortProfileBtn.addEventListener("click", () => {
 savePortProfileBtn.addEventListener("click", saveCurrentPortProfile);
 clearPortProfileBtn.addEventListener("click", clearPortProfile);
 
+loadUiPrefs();
 updateHostSortHeaders();
 
 portScanForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  startPortScan(targetHostInput.value.trim(), getSelectedPorts());
+  const host = targetHostInput.value.trim();
+  if (host && discoveredHosts.some((item) => item.ip === host)) {
+    setSelectedHost(host);
+  }
+  startPortScan(host, getSelectedPorts());
 });
 
 loadNetworkInfo();
+checkLastScanAvailable();
+scheduleAutoRescan();
+updateNotifyStatus();
+refreshServicesPanel();

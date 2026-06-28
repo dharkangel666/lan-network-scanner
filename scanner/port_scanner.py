@@ -4,6 +4,8 @@ from collections.abc import AsyncIterator, Callable, Iterable
 from scanner.banners import grab_port_banner
 from scanner.port_info import get_port_info
 from scanner.port_results import record_port_scan
+from scanner.protocol_probes import probe_open_port
+from scanner.udp_discovery import scan_udp_ports
 
 COMMON_PORTS = [
     21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995,
@@ -83,6 +85,12 @@ async def scan_ports(
             if await scan_port(host, port, timeout=timeout):
                 info = get_port_info(port)
                 banner = await grab_port_banner(host, port, timeout=min(timeout + 0.35, 0.9))
+                probe = await probe_open_port(
+                    host,
+                    port,
+                    service=str(info.get("service") or ""),
+                    timeout=min(timeout + 0.45, 1.0),
+                )
                 result = {
                     "port": port,
                     "service": info["service"],
@@ -92,6 +100,12 @@ async def scan_ports(
                     "risk": info["risk"],
                     "banner": banner,
                 }
+                if probe:
+                    result["probe"] = probe
+                    if probe.get("summary") and not banner:
+                        result["banner"] = probe["summary"]
+                    if probe.get("protocol") == "tls":
+                        result["certificate"] = probe
                 open_ports.append(result)
                 if on_port:
                     on_port(result)
@@ -103,8 +117,24 @@ async def scan_ports(
         if on_progress:
             on_progress(min(offset + len(batch), total), total)
 
+    udp_results = await scan_udp_ports(host, timeout=min(timeout + 0.25, 0.9))
+    for item in udp_results:
+        if on_port:
+            on_port(
+                {
+                    "port": item["port"],
+                    "service": item["service"],
+                    "state": item["state"],
+                    "description": f"UDP service on port {item['port']}",
+                    "common_use": item.get("hint"),
+                    "risk": "Verify the UDP service is expected for this host.",
+                    "banner": None,
+                    "protocol": "udp",
+                }
+            )
+
     open_ports.sort(key=lambda item: item["port"])
-    record_port_scan(host, [item["port"] for item in open_ports], open_ports)
+    record_port_scan(host, [item["port"] for item in open_ports], open_ports, udp_results)
     return open_ports
 
 

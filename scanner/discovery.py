@@ -13,11 +13,12 @@ from scanner.connection import apply_connection_to_host, fetch_starlink_clients,
 from scanner.mdns_services import browse_mdns_services, resolve_services_for_ip
 from scanner.network import LocalNetwork, get_local_network, resolve_hostname
 from scanner.os_detect import OsDetection, detect_os
-from scanner.port_profiles import get_profile
-from scanner.port_results import get_recorded_ports
-from scanner.port_scanner import parse_ports
-from scanner.scan_history import finalize_scan, load_last_scan
+from scanner.port_results import get_recorded_ports, get_recorded_results, get_recorded_udp_results
+from scanner.scan_history import _identity_mac, finalize_scan, load_last_scan
+from scanner.service_graph import protocol_service_hints
 from scanner.service_hints import assemble_host_services
+from scanner.ssdp_discovery import browse_ssdp, resolve_services_for_ip
+from scanner.udp_discovery import hints_from_udp_results
 from scanner.vendor import lookup_vendor, preload_vendor_database
 
 
@@ -79,25 +80,27 @@ def enrich_host_services(
     ip: str,
     detection: OsDetection | None,
     mdns_by_ip: dict[str, list[dict]],
+    ssdp_by_ip: dict[str, list[dict]] | None = None,
 ) -> None:
-    profile_ports: list[int] = []
-    profile = get_profile(ip)
-    if profile and profile.get("ports"):
-        try:
-            profile_ports = parse_ports(str(profile["ports"]))
-        except ValueError:
-            profile_ports = []
-
     open_ports = tuple(getattr(detection, "open_ports", ()) or ()) if detection else ()
+    ssdp_services = resolve_services_for_ip(ip, ssdp_by_ip or {})
+    udp_services = hints_from_udp_results(get_recorded_udp_results(ip))
+    protocol_services = protocol_service_hints(get_recorded_results(ip))
     services, role = assemble_host_services(
         mdns_services=resolve_services_for_ip(ip, mdns_by_ip),
+        ssdp_services=ssdp_services,
+        udp_services=udp_services,
         probed_ports=open_ports,
         scanned_ports=get_recorded_ports(ip),
-        profile_ports=profile_ports,
+        protocol_services=protocol_services,
     )
     if services:
         host["mdns_services"] = services
         host["device_role"] = role
+    if ssdp_services:
+        host["ssdp_services"] = ssdp_services
+    if udp_services:
+        host["udp_services"] = udp_services
 
 
 async def reconcile_missed_hosts(
@@ -105,45 +108,61 @@ async def reconcile_missed_hosts(
     local: LocalNetwork,
     starlink_clients,
     mdns_by_ip: dict[str, list[dict]] | None = None,
+    ssdp_by_ip: dict[str, list[dict]] | None = None,
 ) -> list[dict]:
     """Re-include hosts from the previous scan that still respond but were missed by ARP."""
     last_scan = await asyncio.to_thread(load_last_scan)
     if not last_scan:
         return found
 
-    current_ips = {str(host["ip"]) for host in found}
-    candidates = []
-    for previous in last_scan.get("hosts", []):
-        ip = str(previous.get("ip") or "").strip()
-        if not ip or ip in current_ips or not _in_subnet(ip, local.network):
-            continue
-        candidates.append(previous)
-
-    if not candidates:
-        return found
+    reconciled = list(found)
+    current_ips = {str(host["ip"]) for host in reconciled}
+    current_macs = {_identity_mac(host) for host in reconciled}
+    current_macs.discard("")
 
     neighbors = await asyncio.to_thread(read_neighbor_table, local.interface)
-    reconciled = list(found)
     recovered = 0
 
-    for previous in candidates:
-        ip = str(previous.get("ip"))
+    async def recover_previous(previous: dict, ip: str, mac: str | None) -> None:
+        nonlocal recovered
+        if ip in current_ips or not _in_subnet(ip, local.network):
+            return
         if not await ping_host(ip):
-            continue
+            return
 
-        mac = neighbors.get(ip) or previous.get("mac")
         host = build_host(
             ip=ip,
             local=local,
-            mac=mac,
+            mac=mac or previous.get("mac"),
             method="reconcile",
             hostname=previous.get("hostname"),
             os_name=previous.get("os"),
         )
         apply_connection_to_host(host, local=local, starlink_clients=starlink_clients)
-        enrich_host_services(host, ip, None, mdns_by_ip or {})
+        enrich_host_services(host, ip, None, mdns_by_ip or {}, ssdp_by_ip)
         reconciled.append(host)
+        current_ips.add(ip)
+        identity_mac = _identity_mac(host)
+        if identity_mac:
+            current_macs.add(identity_mac)
         recovered += 1
+
+    for previous in last_scan.get("hosts", []):
+        ip = str(previous.get("ip") or "").strip()
+        if not ip or ip in current_ips or not _in_subnet(ip, local.network):
+            continue
+        mac = neighbors.get(ip) or previous.get("mac")
+        await recover_previous(previous, ip, mac)
+
+    for previous in last_scan.get("hosts", []):
+        mac = _identity_mac(previous)
+        if not mac or mac in current_macs:
+            continue
+        for neighbor_ip, neighbor_mac in neighbors.items():
+            if _identity_mac({"mac": neighbor_mac}) != mac:
+                continue
+            await recover_previous(previous, neighbor_ip, neighbor_mac)
+            break
 
     if recovered:
         reconciled.sort(key=lambda item: ipaddress.IPv4Address(item["ip"]))
@@ -270,6 +289,17 @@ async def discover_hosts(
             on_status("Using port probes and saved scans for service hints...")
 
     if on_status:
+        on_status("Discovering UPnP / SSDP devices...")
+
+    ssdp_by_ip = await asyncio.to_thread(browse_ssdp)
+
+    if on_status:
+        if ssdp_by_ip:
+            on_status(f"Found UPnP services for {len(ssdp_by_ip)} host(s)...")
+        else:
+            on_status("No UPnP responses received.")
+
+    if on_status:
         on_status("Detecting connection types...")
 
     starlink_clients = await asyncio.to_thread(fetch_starlink_clients)
@@ -301,7 +331,7 @@ async def discover_hosts(
         if apply_connection_to_host(host, local=local, starlink_clients=starlink_clients):
             starlink_matched += 1
 
-        enrich_host_services(host, ip, detection, mdns_by_ip)
+        enrich_host_services(host, ip, detection, mdns_by_ip, ssdp_by_ip)
         found.append(host)
 
     if on_status and starlink_clients.client_count > 0:
@@ -313,7 +343,7 @@ async def discover_hosts(
     if on_status:
         on_status("Cross-checking previous scan for missed devices...")
 
-    found = await reconcile_missed_hosts(found, local, starlink_clients, mdns_by_ip)
+    found = await reconcile_missed_hosts(found, local, starlink_clients, mdns_by_ip, ssdp_by_ip)
 
     summary = await asyncio.to_thread(finalize_scan, found, str(local.network))
     summary["starlink"] = summarize_starlink_clients(
@@ -321,6 +351,7 @@ async def discover_hosts(
         matched_count=starlink_matched,
         scanned_count=len(found),
     )
+    summary["ssdp_hosts"] = len(ssdp_by_ip)
 
     for host in found:
         if on_host:

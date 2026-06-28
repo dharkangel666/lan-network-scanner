@@ -9,15 +9,30 @@ from pydantic import BaseModel, Field
 
 from scanner.capabilities import get_capabilities_info
 from scanner.connection import get_starlink_status
+from scanner.desktop_notify import notify_available, send_desktop_notification
 from scanner.discovery import stream_discovery
 from scanner.network import get_local_network
 from scanner.port_info import get_port_info
 from scanner.port_monitor import stream_port_monitor
 from scanner.port_profiles import delete_profile, get_profile, list_profiles, save_profile
-from scanner.port_results import get_recorded_ports
+from scanner.port_results import get_all_host_records, get_recorded_ports, get_recorded_results, get_recorded_udp_results
 from scanner.port_scanner import parse_ports, stream_port_scan
-from scanner.service_hints import assemble_host_services, hints_from_port_spec
+from scanner.scan_history import annotate_scan_changes, load_last_scan
+from scanner.service_graph import (
+    build_host_service_graph,
+    build_network_service_graph,
+    list_certificates,
+    protocol_service_hints,
+)
+from scanner.service_hints import (
+    assemble_host_services,
+    filter_discovered_services,
+    hints_from_port_spec,
+    refresh_host_service_fields,
+)
+from scanner.ssdp_discovery import browse_ssdp
 from scanner.ssh_client import launch_ssh
+from scanner.udp_discovery import hints_from_udp_results
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -34,6 +49,11 @@ class PortScanRequest(BaseModel):
 class PortProfileRequest(BaseModel):
     ports: str = Field(..., min_length=1, description="Port preset or custom list")
     label: str | None = Field(default=None, description="Optional friendly label")
+
+
+class NotifyRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=120)
+    body: str = Field(..., min_length=1, max_length=500)
 
 
 @app.get("/")
@@ -60,6 +80,41 @@ async def network_info() -> dict:
 @app.get("/api/starlink")
 async def starlink_info() -> dict:
     return get_starlink_status()
+
+
+@app.get("/api/notify/status")
+async def notify_status() -> dict:
+    return {"available": notify_available()}
+
+
+@app.post("/api/notify")
+async def send_notification(body: NotifyRequest) -> dict:
+    return await asyncio.to_thread(send_desktop_notification, body.title, body.body)
+
+
+@app.get("/api/scan/last")
+async def last_scan() -> dict:
+    last = load_last_scan()
+    if last is None:
+        return {"available": False}
+    hosts = [dict(host) for host in last.get("hosts", []) if isinstance(host, dict)]
+    for host in hosts:
+        ip = str(host.get("ip") or "")
+        refresh_host_service_fields(
+            host,
+            scanned_ports=get_recorded_ports(ip),
+            port_results=get_recorded_results(ip),
+            udp_results=hints_from_udp_results(get_recorded_udp_results(ip)),
+            protocol_services=protocol_service_hints(get_recorded_results(ip)),
+        )
+    summary = annotate_scan_changes(hosts, None)
+    return {
+        "available": True,
+        "scanned_at": last.get("scanned_at"),
+        "network": last.get("network"),
+        "hosts": hosts,
+        "summary": summary,
+    }
 
 
 @app.get("/api/scan/discovery")
@@ -118,11 +173,70 @@ async def host_services(host: str) -> dict:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    services, role = assemble_host_services(
-        scanned_ports=get_recorded_ports(host),
-        profile_ports=profile_ports,
+    last = load_last_scan()
+    saved_host = next(
+        (item for item in (last or {}).get("hosts", []) if str(item.get("ip")) == host),
+        {},
     )
-    return {"host": host, "services": services, "device_role": role, "has_profile": bool(profile_ports)}
+
+    services, role = assemble_host_services(
+        mdns_services=filter_discovered_services(saved_host.get("mdns_services")),
+        ssdp_services=saved_host.get("ssdp_services"),
+        udp_services=hints_from_udp_results(get_recorded_udp_results(host)),
+        scanned_ports=get_recorded_ports(host),
+        protocol_services=protocol_service_hints(get_recorded_results(host)),
+    )
+    return {
+        "host": host,
+        "services": services,
+        "device_role": role,
+        "has_profile": bool(profile_ports),
+        "profile_ports": profile.get("ports") if profile else None,
+    }
+
+
+@app.get("/api/hosts/{host}/service-graph")
+async def host_service_graph(host: str) -> dict:
+    last = load_last_scan()
+    saved_host = next(
+        (item for item in (last or {}).get("hosts", []) if str(item.get("ip")) == host),
+        None,
+    )
+    if saved_host is None:
+        saved_host = {"ip": host}
+    record = get_all_host_records().get(host, {})
+    return build_host_service_graph(
+        host,
+        mdns_services=filter_discovered_services(saved_host.get("mdns_services")),
+        ssdp_services=saved_host.get("ssdp_services"),
+        udp_services=hints_from_udp_results(get_recorded_udp_results(host)),
+        scanned_ports=record.get("open_ports"),
+        port_results=record.get("results"),
+    )
+
+
+@app.get("/api/services/graph")
+async def services_graph() -> dict:
+    last = load_last_scan()
+    if last is None:
+        return {"hosts": [], "host_count": 0}
+    hosts = [dict(item) for item in last.get("hosts", []) if isinstance(item, dict)]
+    return build_network_service_graph(hosts)
+
+
+@app.get("/api/certificates")
+async def certificates() -> dict:
+    return {"certificates": list_certificates()}
+
+
+@app.get("/api/ssdp")
+async def ssdp_devices() -> dict:
+    devices = await asyncio.to_thread(browse_ssdp)
+    flattened = []
+    for ip, services in devices.items():
+        for service in services:
+            flattened.append({**service, "ip": ip})
+    return {"devices": flattened, "host_count": len(devices)}
 
 
 @app.delete("/api/port-profiles/{host}")

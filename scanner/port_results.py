@@ -30,7 +30,12 @@ def _save_results(hosts: dict[str, dict]) -> None:
     PORT_RESULTS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def record_port_scan(host: str, open_ports: list[int], results: list[dict] | None = None) -> None:
+def record_port_scan(
+    host: str,
+    open_ports: list[int],
+    results: list[dict] | None = None,
+    udp_results: list[dict] | None = None,
+) -> None:
     key = _normalize_host(host)
     if not key:
         return
@@ -40,9 +45,32 @@ def record_port_scan(host: str, open_ports: list[int], results: list[dict] | Non
         "host": key,
         "open_ports": sorted({int(port) for port in open_ports}),
         "results": results or [],
+        "udp_results": udp_results or [],
         "scanned_at": datetime.now(UTC).isoformat(),
     }
     _save_results(hosts)
+
+
+def get_recorded_results(host: str) -> list[dict]:
+    key = _normalize_host(host)
+    record = load_results().get(key)
+    if not record:
+        return []
+    results = record.get("results")
+    return list(results) if isinstance(results, list) else []
+
+
+def get_recorded_udp_results(host: str) -> list[dict]:
+    key = _normalize_host(host)
+    record = load_results().get(key)
+    if not record:
+        return []
+    results = record.get("udp_results")
+    return list(results) if isinstance(results, list) else []
+
+
+def get_all_host_records() -> dict[str, dict]:
+    return load_results()
 
 
 def get_recorded_ports(host: str) -> list[int]:
