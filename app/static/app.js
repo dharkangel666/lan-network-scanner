@@ -59,6 +59,7 @@ const topologyView = document.getElementById("topology-view");
 const topologySubtitle = document.getElementById("topology-subtitle");
 const servicesStatus = document.getElementById("services-status");
 const servicesSummary = document.getElementById("services-summary");
+const servicesHostsBody = document.getElementById("services-hosts-body");
 const certificatesBody = document.getElementById("certificates-body");
 const refreshServicesBtn = document.getElementById("refresh-services-btn");
 const serviceModal = document.getElementById("service-modal");
@@ -976,10 +977,6 @@ function formatServices(host) {
 }
 
 async function refreshServicesPanel() {
-  if (!certificatesBody) {
-    return;
-  }
-
   try {
     const [graphResponse, certResponse] = await Promise.all([
       fetch("/api/services/graph"),
@@ -988,34 +985,126 @@ async function refreshServicesPanel() {
 
     if (graphResponse.ok) {
       const graph = await graphResponse.json();
-      const withApps = (graph.hosts || []).filter((item) => item.applications?.length);
+      const hosts = graph.hosts || [];
+      const withServices = hosts.filter((item) => item.services?.length);
+      const withApps = hosts.filter((item) => item.applications?.length);
+      renderServicesHostsTable(hosts);
       if (servicesSummary) {
         servicesSummary.innerHTML = `
           <span><strong>${graph.host_count || 0}</strong> hosts in graph</span>
+          <span><strong>${withServices.length}</strong> with discovered services</span>
           <span><strong>${withApps.length}</strong> with scanned applications</span>
         `;
       }
-      if (servicesStatus && withApps.length) {
-        setStatus(
-          servicesStatus,
-          `${withApps.length} host${withApps.length === 1 ? "" : "s"} with application-layer data. Click Services in the table for details.`,
-          "done",
-        );
+      if (servicesStatus) {
+        if (withApps.length) {
+          setStatus(
+            servicesStatus,
+            `${withApps.length} host${withApps.length === 1 ? "" : "s"} with application-layer data. Click a row below or Services in the discovery table for details.`,
+            "done",
+          );
+        } else if (withServices.length) {
+          setStatus(
+            servicesStatus,
+            `${withServices.length} host${withServices.length === 1 ? "" : "s"} with discovered services. Port-scan hosts for HTTP titles, TLS certificates, and banners.`,
+            "done",
+          );
+        } else if (graph.host_count > 0) {
+          setStatus(
+            servicesStatus,
+            "Hosts found but no services detected yet. Run Scan Network again or port-scan individual hosts.",
+            "",
+          );
+        } else {
+          setStatus(
+            servicesStatus,
+            "Run Scan Network first, then port-scan hosts to collect application data.",
+            "",
+          );
+        }
       }
+    } else if (servicesStatus) {
+      setStatus(servicesStatus, "Could not load service graph.", "error");
+      renderServicesHostsTable([]);
     }
 
     if (certResponse.ok) {
       const data = await certResponse.json();
       renderCertificatesTable(data.certificates || []);
+    } else if (certificatesBody) {
+      renderCertificatesTable([]);
     }
   } catch {
     if (servicesStatus) {
       setStatus(servicesStatus, "Could not load service graph.", "error");
     }
+    renderServicesHostsTable([]);
   }
 }
 
+function formatApplicationSummary(app) {
+  const proto = String(app.protocol || "tcp").toUpperCase();
+  const port = app.port ?? "—";
+  const detail =
+    app.probe?.summary || app.banner || app.service || app.state || "";
+  return detail ? `${proto} ${port}: ${detail}` : `${proto} ${port}`;
+}
+
+function renderServicesHostsTable(hosts) {
+  if (!servicesHostsBody) {
+    return;
+  }
+
+  const enriched = (hosts || []).filter(
+    (host) => host.services?.length || host.applications?.length,
+  );
+  enriched.sort((left, right) => String(left.host).localeCompare(String(right.host)));
+
+  if (!enriched.length) {
+    servicesHostsBody.innerHTML = `
+      <tr class="empty-row">
+        <td colspan="3">No services discovered yet. Run Scan Network, then port-scan hosts for application details.</td>
+      </tr>
+    `;
+    return;
+  }
+
+  servicesHostsBody.innerHTML = enriched
+    .map((host) => {
+      const serviceLabels = (host.services || [])
+        .map((service) => service.label)
+        .filter(Boolean)
+        .join(" · ");
+      const applications = (host.applications || [])
+        .map((app) => formatApplicationSummary(app))
+        .join(" · ");
+      return `
+        <tr class="services-host-row" data-host-ip="${escapeHtml(host.host)}" tabindex="0" role="button" title="Show full service graph">
+          <td class="mono">${escapeHtml(host.host)}</td>
+          <td>${escapeHtml(host.role || serviceLabels || "—")}</td>
+          <td class="services-apps-cell">${escapeHtml(applications || "—")}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  servicesHostsBody.querySelectorAll(".services-host-row").forEach((row) => {
+    const openGraph = () => showHostServiceGraph(row.dataset.hostIp);
+    row.addEventListener("click", openGraph);
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openGraph();
+      }
+    });
+  });
+}
+
 function renderCertificatesTable(certificates) {
+  if (!certificatesBody) {
+    return;
+  }
+
   if (!certificates.length) {
     certificatesBody.innerHTML = `
       <tr class="empty-row">

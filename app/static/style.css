@@ -1224,6 +1224,49 @@ tbody tr.local-host {
   color: var(--text);
 }
 
+.panel-subheading {
+  margin: 1.25rem 0 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.services-hosts-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.services-hosts-table th,
+.services-hosts-table td {
+  padding: 0.55rem 0.65rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.services-hosts-table th {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.services-host-row {
+  cursor: pointer;
+}
+
+.services-host-row:hover,
+.services-host-row:focus-visible {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  outline: none;
+}
+
+.services-apps-cell {
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
 .certificates-table {
   width: 100%;
   border-collapse: collapse;
