@@ -287,6 +287,108 @@ h2 {
   color: var(--muted);
 }
 
+.infrastructure-panel {
+  margin: 1rem 0 1.25rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: var(--summary-bg);
+}
+
+.infrastructure-panel.hidden {
+  display: none;
+}
+
+.infrastructure-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+
+.infrastructure-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.infrastructure-subtitle {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.infrastructure-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+}
+
+.infrastructure-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 10px;
+  border: 1px solid var(--panel-border);
+  background: var(--panel);
+}
+
+.infrastructure-card-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.infrastructure-card-ip {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.infrastructure-card-host,
+.infrastructure-card-meta {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.infra-role {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 0.2rem 0.2rem 0;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--text);
+}
+
+.infra-role-gateway,
+.infra-role-router {
+  background: color-mix(in srgb, #f59e0b 22%, transparent);
+}
+
+.infra-role-dns {
+  background: color-mix(in srgb, #3b82f6 22%, transparent);
+}
+
+.infra-role-dhcp {
+  background: color-mix(in srgb, #10b981 22%, transparent);
+}
+
+.infra-role-ntp {
+  background: color-mix(in srgb, #8b5cf6 22%, transparent);
+}
+
+tbody tr.infra-host {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.col-infra {
+  min-width: 8rem;
+}
+
 .topology-panel {
   margin-bottom: 1rem;
   padding: 1rem;

@@ -16,6 +16,7 @@ from scanner.os_detect import OsDetection, detect_os
 from scanner.port_results import get_recorded_ports, get_recorded_results, get_recorded_udp_results
 from scanner.scan_history import _identity_mac, finalize_scan, load_last_scan
 from scanner.service_graph import protocol_service_hints
+from scanner.infrastructure import identify_infrastructure
 from scanner.service_hints import assemble_host_services
 from scanner.ssdp_discovery import browse_ssdp, resolve_services_for_ip
 from scanner.udp_discovery import hints_from_udp_results
@@ -345,6 +346,30 @@ async def discover_hosts(
 
     found = await reconcile_missed_hosts(found, local, starlink_clients, mdns_by_ip, ssdp_by_ip)
 
+    if on_status:
+        on_status("Identifying critical services (gateway, DNS, DHCP)...")
+
+    infrastructure = await identify_infrastructure(found, local)
+
+    gateway_ip = infrastructure.get("configured_gateway")
+    if gateway_ip and not any(str(host.get("ip")) == gateway_ip for host in found):
+        gateway_host = build_host(gateway_ip, local, method="configured")
+        for service in infrastructure.get("services", []):
+            if service.get("role") == "gateway" and service.get("ip") == gateway_ip:
+                gateway_host["infra_roles"] = [
+                    {
+                        "role": "gateway",
+                        "label": service.get("label") or "Gateway",
+                        "confidence": service.get("confidence") or "configured",
+                        "detail": service.get("detail"),
+                    }
+                ]
+                gateway_host["infra_role_labels"] = "Gateway"
+                break
+        enrich_host_services(gateway_host, gateway_ip, None, mdns_by_ip, ssdp_by_ip)
+        found.append(gateway_host)
+        found.sort(key=lambda item: ipaddress.IPv4Address(item["ip"]))
+
     summary = await asyncio.to_thread(finalize_scan, found, str(local.network))
     summary["starlink"] = summarize_starlink_clients(
         starlink_clients,
@@ -352,6 +377,7 @@ async def discover_hosts(
         scanned_count=len(found),
     )
     summary["ssdp_hosts"] = len(ssdp_by_ip)
+    summary["infrastructure"] = infrastructure
 
     for host in found:
         if on_host:

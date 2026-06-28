@@ -190,6 +190,8 @@ _DISPLAY_HOST_KEYS = (
     "connection_detail",
     "mdns_services",
     "device_role",
+    "infra_roles",
+    "infra_role_labels",
     "starlink_name",
     "starlink_band",
     "starlink_signal_dbm",
@@ -216,6 +218,9 @@ def _public_summary(summary: dict | None) -> dict | None:
             "seen_count",
             "disappeared",
             "previous_scan_at",
+            "infrastructure",
+            "starlink",
+            "ssdp_hosts",
         )
         if key in summary
     }

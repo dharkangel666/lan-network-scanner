@@ -81,6 +81,13 @@
       </div>
       <div class="status" id="discovery-status">Ready to scan your local network.</div>
       <div class="discovery-summary hidden" id="discovery-summary"></div>
+      <section class="infrastructure-panel hidden" id="infrastructure-panel" aria-label="Critical network services">
+        <div class="infrastructure-header">
+          <h3>Critical services</h3>
+          <span class="infrastructure-subtitle" id="infrastructure-subtitle"></span>
+        </div>
+        <div class="infrastructure-grid" id="infrastructure-grid"></div>
+      </section>
       <section class="topology-panel hidden" id="topology-panel" aria-label="Network topology">
         <div class="topology-header">
           <h3>Topology</h3>
@@ -112,6 +119,7 @@
               <th class="sortable" data-sort="mac" scope="col">MAC Address</th>
               <th class="sortable" data-sort="vendor" scope="col">Vendor</th>
               <th class="sortable" data-sort="hostname" scope="col">Hostname</th>
+              <th class="sortable" data-sort="infra" scope="col">Network role</th>
               <th class="sortable" data-sort="services" scope="col">Services</th>
               <th class="sortable" data-sort="connection" scope="col">Connection</th>
               <th class="sortable" data-sort="starlink" scope="col">Signal / Band</th>
@@ -121,7 +129,7 @@
           </thead>
           <tbody id="hosts-body">
             <tr class="empty-row">
-              <td colspan="9">No hosts discovered yet.</td>
+              <td colspan="10">No hosts discovered yet.</td>
             </tr>
           </tbody>
         </table>

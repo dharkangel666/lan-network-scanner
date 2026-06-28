@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from scanner.capabilities import get_capabilities_info
 from scanner.connection import get_starlink_status
-from scanner.desktop_notify import notify_available, send_desktop_notification
+from scanner.infrastructure import identify_infrastructure, read_local_infrastructure_hints
 from scanner.discovery import stream_discovery
 from scanner.network import get_local_network
 from scanner.port_info import get_port_info
@@ -61,6 +61,32 @@ async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/api/infrastructure")
+async def infrastructure_info() -> dict:
+    last = load_last_scan()
+    if last and last.get("summary", {}).get("infrastructure"):
+        return last["summary"]["infrastructure"]
+
+    local = get_local_network()
+    if local is None:
+        raise HTTPException(status_code=500, detail="Could not detect local network")
+
+    hosts = [dict(item) for item in (last or {}).get("hosts", []) if isinstance(item, dict)]
+    if not hosts:
+        hints = await asyncio.to_thread(read_local_infrastructure_hints)
+        return {
+            "domain": hints.domain,
+            "configured_dns": hints.dns_servers,
+            "configured_gateway": hints.gateway,
+            "configured_dhcp": hints.dhcp_server,
+            "services": [],
+            "service_count": 0,
+            "message": "Run Scan Network to identify infrastructure on this LAN.",
+        }
+
+    return await identify_infrastructure(hosts, local)
+
+
 @app.get("/api/network")
 async def network_info() -> dict:
     local = get_local_network()
@@ -108,12 +134,16 @@ async def last_scan() -> dict:
             protocol_services=protocol_service_hints(get_recorded_results(ip)),
         )
     summary = annotate_scan_changes(hosts, None)
+    saved_summary = last.get("summary") if isinstance(last.get("summary"), dict) else {}
+    if saved_summary.get("infrastructure"):
+        summary["infrastructure"] = saved_summary["infrastructure"]
     return {
         "available": True,
         "scanned_at": last.get("scanned_at"),
         "network": last.get("network"),
         "hosts": hosts,
         "summary": summary,
+        "infrastructure": summary.get("infrastructure"),
     }
 
 

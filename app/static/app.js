@@ -35,6 +35,9 @@ const portMonitorStatus = document.getElementById("port-monitor-status");
 const portMonitorStats = document.getElementById("port-monitor-stats");
 const portMonitorLog = document.getElementById("port-monitor-log");
 const discoverySummary = document.getElementById("discovery-summary");
+const infrastructurePanel = document.getElementById("infrastructure-panel");
+const infrastructureGrid = document.getElementById("infrastructure-grid");
+const infrastructureSubtitle = document.getElementById("infrastructure-subtitle");
 const hostsToolbar = document.getElementById("hosts-toolbar");
 const hostsFilterInput = document.getElementById("hosts-filter");
 const hostsFilterCount = document.getElementById("hosts-filter-count");
@@ -408,6 +411,7 @@ function hostMatchesFilter(host, query) {
     host.connection_label,
     host.connection_detail,
     host.device_role,
+    host.infra_role_labels,
     host.starlink_name,
     host.starlink_band,
     host.starlink_signal_dbm,
@@ -450,12 +454,72 @@ function updateHostsToolbar() {
   }
 }
 
+function renderInfrastructurePanel(infrastructure) {
+  if (!infrastructurePanel || !infrastructureGrid) {
+    return;
+  }
+
+  const services = infrastructure?.services || [];
+  if (!services.length) {
+    infrastructurePanel.classList.add("hidden");
+    infrastructureGrid.innerHTML = "";
+    return;
+  }
+
+  infrastructurePanel.classList.remove("hidden");
+  const parts = [];
+  if (infrastructure.domain) {
+    parts.push(`Domain: ${infrastructure.domain}`);
+  }
+  if (infrastructure.configured_dns?.length) {
+    parts.push(`Resolver: ${infrastructure.configured_dns.join(", ")}`);
+  }
+  infrastructureSubtitle.textContent = parts.join(" · ");
+
+  infrastructureGrid.innerHTML = services
+    .map((service) => {
+      const label = service.label || service.role || "Service";
+      const ip = service.ip || "—";
+      const hostLabel = service.hostname || service.vendor || "";
+      const confidence = service.confidence ? ` (${service.confidence})` : "";
+      const detail = service.detail ? ` — ${service.detail}` : "";
+      return `
+        <article class="infrastructure-card infrastructure-${escapeHtml(service.role || "service")}">
+          <span class="infrastructure-card-label">${escapeHtml(label)}</span>
+          <span class="infrastructure-card-ip mono">${escapeHtml(ip)}</span>
+          ${hostLabel ? `<span class="infrastructure-card-host">${escapeHtml(hostLabel)}</span>` : ""}
+          <span class="infrastructure-card-meta">${escapeHtml(`${confidence}${detail}`.trim())}</span>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function formatInfraRoles(host) {
+  const roles = host.infra_roles || [];
+  if (!roles.length) {
+    return '<span class="infra-role missing">—</span>';
+  }
+  return roles
+    .map((role) => {
+      const label = role.label || role.role || "Role";
+      const confidence = role.confidence ? ` (${role.confidence})` : "";
+      const detail = role.detail ? ` — ${role.detail}` : "";
+      const title = `${label}${confidence}${detail}`.replaceAll('"', "&quot;");
+      return `<span class="infra-role infra-role-${escapeHtml(role.role || "other")}" title="${title}">${escapeHtml(label)}</span>`;
+    })
+    .join(" ");
+}
+
 function renderDiscoverySummary(summary) {
   if (!summary) {
     discoverySummary.classList.add("hidden");
     discoverySummary.innerHTML = "";
+    renderInfrastructurePanel(null);
     return;
   }
+
+  renderInfrastructurePanel(summary.infrastructure);
 
   if (summary.first_scan) {
     discoverySummary.innerHTML =
@@ -625,6 +689,7 @@ function exportHostsCsv() {
     "mac",
     "vendor",
     "hostname",
+    "infra_role_labels",
     "device_role",
     "connection_label",
     "connection",
@@ -769,6 +834,8 @@ function compareHosts(left, right, column) {
       return compareText(left.vendor || "", right.vendor || "");
     case "hostname":
       return compareText(left.hostname || "", right.hostname || "");
+    case "infra":
+      return compareText(left.infra_role_labels || "", right.infra_role_labels || "");
     case "services":
       return compareText(left.device_role || "", right.device_role || "");
     case "connection": {
@@ -1464,7 +1531,12 @@ function createHostRow(host) {
     row.classList.add("selected-host");
   }
 
+  if (host.infra_roles?.length) {
+    row.classList.add("infra-host");
+  }
+
   const hostname = host.hostname || "—";
+  const infraRoles = formatInfraRoles(host);
   const services = formatServices(host);
   const mac = host.mac || "—";
   const vendor = host.vendor || "—";
@@ -1483,6 +1555,7 @@ function createHostRow(host) {
     <td class="mono col-mac copyable-host-mac">${mac}</td>
     <td class="col-vendor">${vendor}${methodBadge}</td>
     <td class="col-hostname">${hostname}</td>
+    <td class="col-infra">${infraRoles}</td>
     <td>${services}</td>
     <td>${connection}</td>
     <td>${starlinkSignal}</td>
