@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Network Scanner</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div>
+        <h1>Network Scanner</h1>
+        <p class="subtitle">Discover devices on your LAN and scan open ports</p>
+      </div>
+      <div class="network-badge" id="network-info">Detecting network...</div>
+    </header>
+
+    <div class="notice hidden" id="setup-notice">
+      <div>
+        <strong>One-time setup for active ARP scanning</strong>
+        <p id="setup-message"></p>
+      </div>
+      <code id="setup-command"></code>
+    </div>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>LAN Discovery</h2>
+        <button id="scan-network-btn" class="primary">Scan Network</button>
+      </div>
+      <div class="status" id="discovery-status">Ready to scan your local network.</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>IP Address</th>
+              <th>MAC Address</th>
+              <th>Vendor</th>
+              <th>Hostname</th>
+              <th>Operating System</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="hosts-body">
+            <tr class="empty-row">
+              <td colspan="6">No hosts discovered yet.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Port Scanner</h2>
+      </div>
+      <form id="port-scan-form" class="port-form">
+        <label>
+          Target host
+          <input type="text" id="target-host" placeholder="192.168.1.1" required>
+        </label>
+        <label class="ports-field">
+          Ports
+          <select id="target-ports-preset">
+            <option value="common" selected>Common ports</option>
+            <option value="1-1024">Well-known (1-1024)</option>
+            <option value="all">All ports (1-65535)</option>
+            <option value="custom">Custom...</option>
+          </select>
+          <input
+            type="text"
+            id="target-ports-custom"
+            class="hidden"
+            placeholder="22,80,443 or 9000-9010"
+          >
+        </label>
+        <button type="submit" class="primary" id="scan-ports-btn">Scan Ports</button>
+      </form>
+      <div class="status" id="port-status">Select a host or enter an IP to scan ports. Double-click a port for details, or use Monitor beside each result.</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Port</th>
+              <th>Service</th>
+              <th>State</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="ports-body">
+            <tr class="empty-row">
+              <td colspan="4">No open ports found yet.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="monitor-panel hidden" id="port-monitor-panel">
+        <div class="monitor-header">
+          <h3 id="port-monitor-title">Port activity</h3>
+          <button type="button" class="secondary hidden" id="port-monitor-stop-btn">Stop</button>
+        </div>
+        <div class="monitor-status" id="port-monitor-status">Ready to monitor.</div>
+        <div class="monitor-stats" id="port-monitor-stats"></div>
+        <div class="monitor-log" id="port-monitor-log"></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="modal hidden" id="port-modal" aria-hidden="true">
+    <div class="modal-backdrop" id="port-modal-backdrop"></div>
+    <div class="modal-card" role="dialog" aria-labelledby="port-modal-title">
+      <button type="button" class="modal-close" id="port-modal-close" aria-label="Close">×</button>
+      <h3 id="port-modal-title">Port details</h3>
+      <p class="modal-service" id="port-modal-service"></p>
+      <p id="port-modal-description"></p>
+      <div class="modal-meta">
+        <div>
+          <span class="modal-label">Common use</span>
+          <p id="port-modal-use"></p>
+        </div>
+        <div>
+          <span class="modal-label">Security note</span>
+          <p id="port-modal-risk"></p>
+        </div>
+      </div>
+      <div class="modal-connect hidden" id="port-modal-connect">
+        <span class="modal-label">Connect</span>
+        <div class="connect-actions" id="port-modal-connect-actions"></div>
+        <p class="connect-note" id="port-modal-connect-note"></p>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
