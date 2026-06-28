@@ -8,11 +8,15 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from scanner.capabilities import get_capabilities_info
+from scanner.connection import get_starlink_status
 from scanner.discovery import stream_discovery
 from scanner.network import get_local_network
 from scanner.port_info import get_port_info
 from scanner.port_monitor import stream_port_monitor
+from scanner.port_profiles import delete_profile, get_profile, list_profiles, save_profile
+from scanner.port_results import get_recorded_ports
 from scanner.port_scanner import parse_ports, stream_port_scan
+from scanner.service_hints import assemble_host_services, hints_from_port_spec
 from scanner.ssh_client import launch_ssh
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -25,6 +29,11 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 class PortScanRequest(BaseModel):
     host: str = Field(..., description="Target IP or hostname")
     ports: str = Field(default="common", description="common, 1-1024, or comma-separated ports")
+
+
+class PortProfileRequest(BaseModel):
+    ports: str = Field(..., min_length=1, description="Port preset or custom list")
+    label: str | None = Field(default=None, description="Optional friendly label")
 
 
 @app.get("/")
@@ -43,8 +52,14 @@ async def network_info() -> dict:
         "address": str(local.address),
         "network": str(local.network),
         "cidr": local.network.prefixlen,
+        "starlink": get_starlink_status(),
         **get_capabilities_info(),
     }
+
+
+@app.get("/api/starlink")
+async def starlink_info() -> dict:
+    return get_starlink_status()
 
 
 @app.get("/api/scan/discovery")
@@ -58,12 +73,63 @@ async def discovery_scan() -> StreamingResponse:
         async for item in stream_discovery(local):
             if item["event"] == "status":
                 yield _sse({"type": "status", "message": item["message"]})
+            elif item["event"] == "summary":
+                yield _sse({"type": "summary", **{key: value for key, value in item.items() if key != "event"}})
             else:
                 yield _sse({"type": "host", "host": item["host"]})
             await asyncio.sleep(0)
         yield _sse({"type": "done"})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/port-profiles")
+async def port_profiles() -> dict:
+    return {"profiles": list_profiles()}
+
+
+@app.get("/api/port-profiles/{host}")
+async def port_profile(host: str) -> dict:
+    profile = get_profile(host)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="No saved profile for this host")
+    return profile
+
+
+@app.put("/api/port-profiles/{host}")
+async def upsert_port_profile(host: str, body: PortProfileRequest) -> dict:
+    try:
+        parse_ports(body.ports)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        return save_profile(host, body.ports, body.label)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/hosts/{host}/services")
+async def host_services(host: str) -> dict:
+    profile = get_profile(host)
+    profile_ports: list[int] = []
+    if profile and profile.get("ports"):
+        try:
+            profile_ports = parse_ports(str(profile["ports"]))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    services, role = assemble_host_services(
+        scanned_ports=get_recorded_ports(host),
+        profile_ports=profile_ports,
+    )
+    return {"host": host, "services": services, "device_role": role, "has_profile": bool(profile_ports)}
+
+
+@app.delete("/api/port-profiles/{host}")
+async def remove_port_profile(host: str) -> dict:
+    if not delete_profile(host):
+        raise HTTPException(status_code=404, detail="No saved profile for this host")
+    return {"deleted": True, "host": host}
 
 
 @app.get("/api/ports/{port}")

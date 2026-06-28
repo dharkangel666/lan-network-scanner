@@ -1,7 +1,9 @@
 import asyncio
 from collections.abc import AsyncIterator, Callable, Iterable
 
+from scanner.banners import grab_port_banner
 from scanner.port_info import get_port_info
+from scanner.port_results import record_port_scan
 
 COMMON_PORTS = [
     21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995,
@@ -80,6 +82,7 @@ async def scan_ports(
         async with semaphore:
             if await scan_port(host, port, timeout=timeout):
                 info = get_port_info(port)
+                banner = await grab_port_banner(host, port, timeout=min(timeout + 0.35, 0.9))
                 result = {
                     "port": port,
                     "service": info["service"],
@@ -87,6 +90,7 @@ async def scan_ports(
                     "description": info["description"],
                     "common_use": info["common_use"],
                     "risk": info["risk"],
+                    "banner": banner,
                 }
                 open_ports.append(result)
                 if on_port:
@@ -100,6 +104,7 @@ async def scan_ports(
             on_progress(min(offset + len(batch), total), total)
 
     open_ports.sort(key=lambda item: item["port"])
+    record_port_scan(host, [item["port"] for item in open_ports], open_ports)
     return open_ports
 
 

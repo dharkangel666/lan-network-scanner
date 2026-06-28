@@ -24,27 +24,58 @@
       <code id="setup-command"></code>
     </div>
 
+    <section class="starlink-panel hidden" id="starlink-panel">
+      <div class="starlink-panel-header">
+        <div>
+          <h2>Starlink Router</h2>
+          <p class="starlink-subtitle" id="starlink-subtitle">Connected clients from your Starlink router</p>
+        </div>
+        <span class="starlink-status-badge" id="starlink-status-badge">Checking…</span>
+      </div>
+      <div class="starlink-stats" id="starlink-stats"></div>
+    </section>
+
     <section class="panel">
       <div class="panel-header">
         <h2>LAN Discovery</h2>
         <button id="scan-network-btn" class="primary">Scan Network</button>
       </div>
       <div class="status" id="discovery-status">Ready to scan your local network.</div>
-      <div class="table-wrap">
-        <table>
+      <div class="discovery-summary hidden" id="discovery-summary"></div>
+      <div class="hosts-toolbar hidden" id="hosts-toolbar">
+        <label class="hosts-search">
+          <span class="visually-hidden">Filter hosts</span>
+          <input
+            type="search"
+            id="hosts-filter"
+            placeholder="Filter by IP, name, vendor, connection…"
+            autocomplete="off"
+          >
+        </label>
+        <div class="hosts-toolbar-actions">
+          <span class="hosts-filter-count" id="hosts-filter-count"></span>
+          <button type="button" class="secondary" id="export-hosts-csv" disabled>Export CSV</button>
+          <button type="button" class="secondary" id="export-hosts-json" disabled>Export JSON</button>
+        </div>
+      </div>
+      <div class="table-wrap hosts-table-wrap">
+        <table class="hosts-table">
           <thead>
             <tr>
-              <th>IP Address</th>
-              <th>MAC Address</th>
-              <th>Vendor</th>
-              <th>Hostname</th>
-              <th>Operating System</th>
-              <th>Actions</th>
+              <th class="sortable sorted-asc" data-sort="ip" scope="col">IP Address</th>
+              <th class="sortable" data-sort="mac" scope="col">MAC Address</th>
+              <th class="sortable" data-sort="vendor" scope="col">Vendor</th>
+              <th class="sortable" data-sort="hostname" scope="col">Hostname</th>
+              <th class="sortable" data-sort="services" scope="col">Services</th>
+              <th class="sortable" data-sort="connection" scope="col">Connection</th>
+              <th class="sortable" data-sort="starlink" scope="col">Signal / Band</th>
+              <th class="sortable" data-sort="os" scope="col">Operating System</th>
+              <th scope="col">Actions</th>
             </tr>
           </thead>
           <tbody id="hosts-body">
             <tr class="empty-row">
-              <td colspan="6">No hosts discovered yet.</td>
+              <td colspan="9">No hosts discovered yet.</td>
             </tr>
           </tbody>
         </table>
@@ -77,6 +108,12 @@
         </label>
         <button type="submit" class="primary" id="scan-ports-btn">Scan Ports</button>
       </form>
+      <div class="port-profile-actions">
+        <span id="port-profile-status" class="port-profile-status">No saved port profile for this host.</span>
+          <button type="button" class="secondary" id="load-port-profile-btn" disabled>Use saved profile</button>
+          <button type="button" class="secondary" id="save-port-profile-btn" disabled>Save profile</button>
+          <button type="button" class="secondary" id="clear-port-profile-btn" disabled>Clear profile</button>
+        </div>
       <div class="status" id="port-status">Select a host or enter an IP to scan ports. Double-click a port for details, or use Monitor beside each result.</div>
       <div class="table-wrap">
         <table>
@@ -84,13 +121,14 @@
             <tr>
               <th>Port</th>
               <th>Service</th>
+              <th>Banner / version</th>
               <th>State</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody id="ports-body">
             <tr class="empty-row">
-              <td colspan="4">No open ports found yet.</td>
+              <td colspan="5">No open ports found yet.</td>
             </tr>
           </tbody>
         </table>
@@ -122,6 +160,10 @@
         <div>
           <span class="modal-label">Security note</span>
           <p id="port-modal-risk"></p>
+        </div>
+        <div class="modal-banner hidden" id="port-modal-banner-wrap">
+          <span class="modal-label">Banner / version</span>
+          <p id="port-modal-banner" class="mono"></p>
         </div>
       </div>
       <div class="modal-connect hidden" id="port-modal-connect">

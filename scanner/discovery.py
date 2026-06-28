@@ -9,8 +9,15 @@ from scanner.arp import (
     merge_mac_tables,
     read_neighbor_table,
 )
+from scanner.connection import apply_connection_to_host, fetch_starlink_clients, summarize_starlink_clients
+from scanner.mdns_services import browse_mdns_services, resolve_services_for_ip
 from scanner.network import LocalNetwork, get_local_network, resolve_hostname
 from scanner.os_detect import OsDetection, detect_os
+from scanner.port_profiles import get_profile
+from scanner.port_results import get_recorded_ports
+from scanner.port_scanner import parse_ports
+from scanner.scan_history import finalize_scan, load_last_scan
+from scanner.service_hints import assemble_host_services
 from scanner.vendor import lookup_vendor, preload_vendor_database
 
 
@@ -58,7 +65,90 @@ def build_host(
         "os_detail": os_detail,
         "is_local": ip == str(local.address),
         "method": method,
+        "connection": "unknown",
+        "connection_label": "Unknown",
+        "connection_source": "unknown",
+        "connection_detail": None,
+        "mdns_services": [],
+        "device_role": None,
     }
+
+
+def enrich_host_services(
+    host: dict,
+    ip: str,
+    detection: OsDetection | None,
+    mdns_by_ip: dict[str, list[dict]],
+) -> None:
+    profile_ports: list[int] = []
+    profile = get_profile(ip)
+    if profile and profile.get("ports"):
+        try:
+            profile_ports = parse_ports(str(profile["ports"]))
+        except ValueError:
+            profile_ports = []
+
+    open_ports = tuple(getattr(detection, "open_ports", ()) or ()) if detection else ()
+    services, role = assemble_host_services(
+        mdns_services=resolve_services_for_ip(ip, mdns_by_ip),
+        probed_ports=open_ports,
+        scanned_ports=get_recorded_ports(ip),
+        profile_ports=profile_ports,
+    )
+    if services:
+        host["mdns_services"] = services
+        host["device_role"] = role
+
+
+async def reconcile_missed_hosts(
+    found: list[dict],
+    local: LocalNetwork,
+    starlink_clients,
+    mdns_by_ip: dict[str, list[dict]] | None = None,
+) -> list[dict]:
+    """Re-include hosts from the previous scan that still respond but were missed by ARP."""
+    last_scan = await asyncio.to_thread(load_last_scan)
+    if not last_scan:
+        return found
+
+    current_ips = {str(host["ip"]) for host in found}
+    candidates = []
+    for previous in last_scan.get("hosts", []):
+        ip = str(previous.get("ip") or "").strip()
+        if not ip or ip in current_ips or not _in_subnet(ip, local.network):
+            continue
+        candidates.append(previous)
+
+    if not candidates:
+        return found
+
+    neighbors = await asyncio.to_thread(read_neighbor_table, local.interface)
+    reconciled = list(found)
+    recovered = 0
+
+    for previous in candidates:
+        ip = str(previous.get("ip"))
+        if not await ping_host(ip):
+            continue
+
+        mac = neighbors.get(ip) or previous.get("mac")
+        host = build_host(
+            ip=ip,
+            local=local,
+            mac=mac,
+            method="reconcile",
+            hostname=previous.get("hostname"),
+            os_name=previous.get("os"),
+        )
+        apply_connection_to_host(host, local=local, starlink_clients=starlink_clients)
+        enrich_host_services(host, ip, None, mdns_by_ip or {})
+        reconciled.append(host)
+        recovered += 1
+
+    if recovered:
+        reconciled.sort(key=lambda item: ipaddress.IPv4Address(item["ip"]))
+
+    return reconciled
 
 
 async def discover_hosts(
@@ -168,7 +258,35 @@ async def discover_hosts(
     os_results = await asyncio.gather(*(detect_host_os(ip) for ip in sorted_ips))
     os_by_ip = dict(os_results)
 
+    if on_status:
+        on_status("Browsing mDNS services...")
+
+    mdns_by_ip = await asyncio.to_thread(browse_mdns_services)
+
+    if on_status:
+        if mdns_by_ip:
+            on_status(f"Found mDNS services for {len(mdns_by_ip)} host(s)...")
+        else:
+            on_status("Using port probes and saved scans for service hints...")
+
+    if on_status:
+        on_status("Detecting connection types...")
+
+    starlink_clients = await asyncio.to_thread(fetch_starlink_clients)
+
+    if on_status:
+        if starlink_clients.client_count > 0:
+            on_status(
+                f"Starlink router reported {starlink_clients.client_count} clients "
+                f"({len(starlink_clients.by_ip)} with IP) — matching devices..."
+            )
+        elif starlink_clients.error:
+            on_status(f"Starlink data unavailable ({starlink_clients.error}) — using guesses")
+        else:
+            on_status("Starlink returned no clients — using guesses")
+
     found: list[dict] = []
+    starlink_matched = 0
     for ip in sorted_ips:
         detection = os_by_ip.get(ip)
         host = build_host(
@@ -180,11 +298,35 @@ async def discover_hosts(
             os_name=getattr(detection, "os", None) if detection else None,
             os_detail=getattr(detection, "detail", None) if detection else None,
         )
+        if apply_connection_to_host(host, local=local, starlink_clients=starlink_clients):
+            starlink_matched += 1
+
+        enrich_host_services(host, ip, detection, mdns_by_ip)
         found.append(host)
+
+    if on_status and starlink_clients.client_count > 0:
+        on_status(
+            f"Matched {starlink_matched} of {len(found)} hosts from Starlink "
+            f"({starlink_clients.client_count} on router)"
+        )
+
+    if on_status:
+        on_status("Cross-checking previous scan for missed devices...")
+
+    found = await reconcile_missed_hosts(found, local, starlink_clients, mdns_by_ip)
+
+    summary = await asyncio.to_thread(finalize_scan, found, str(local.network))
+    summary["starlink"] = summarize_starlink_clients(
+        starlink_clients,
+        matched_count=starlink_matched,
+        scanned_count=len(found),
+    )
+
+    for host in found:
         if on_host:
             on_host(host)
 
-    return found
+    return found, summary
 
 
 async def stream_discovery(
@@ -201,12 +343,13 @@ async def stream_discovery(
 
     async def run_scan() -> None:
         try:
-            await discover_hosts(
+            _, summary = await discover_hosts(
                 network=network,
                 concurrency=concurrency,
                 on_host=on_host,
                 on_status=on_status,
             )
+            await queue.put({"event": "summary", **summary})
         finally:
             await queue.put(None)
 

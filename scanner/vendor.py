@@ -4,7 +4,7 @@ import urllib.request
 from pathlib import Path
 
 OUI_URL = "https://standards-oui.ieee.org/oui/oui.csv"
-CACHE_DIR = Path.home() / ".cache" / "network-scanner"
+CACHE_DIR = Path.home() / ".cache" / "lan-network-scanner"
 OUI_CACHE_FILE = CACHE_DIR / "oui.csv"
 
 _lock = threading.Lock()
@@ -31,7 +31,7 @@ def _prefix_key(prefix: str) -> str:
 
 def _download_oui_database() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(OUI_URL, headers={"User-Agent": "network-scanner/1.0"})
+    request = urllib.request.Request(OUI_URL, headers={"User-Agent": "lan-network-scanner/1.0"})
     with urllib.request.urlopen(request, timeout=30) as response:
         OUI_CACHE_FILE.write_bytes(response.read())
 

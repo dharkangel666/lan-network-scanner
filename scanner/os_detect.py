@@ -4,6 +4,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 
+from scanner.banners import read_http_server_header, read_ssh_banner
 from scanner.port_scanner import scan_port
 
 OS_PROBE_PORTS = [22, 23, 80, 135, 139, 443, 445, 62078, 8080]
@@ -36,6 +37,7 @@ class OsDetection:
     os: str | None
     detail: str | None = None
     confidence: str = "low"
+    open_ports: tuple[int, ...] = ()
 
 
 def get_local_os() -> OsDetection:
@@ -143,29 +145,11 @@ async def _probe_open_ports(ip: str, ports: list[int], timeout: float = 0.35) ->
 
 
 async def _read_ssh_banner(ip: str, timeout: float = 1.0) -> str | None:
-    try:
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, 22), timeout=timeout)
-        banner = await asyncio.wait_for(reader.readline(), timeout=timeout)
-        writer.close()
-        await writer.wait_closed()
-        text = banner.decode("utf-8", errors="ignore").strip()
-        return text or None
-    except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
-        return None
+    return await read_ssh_banner(ip, timeout=timeout)
 
 
 async def _read_http_server(ip: str, port: int, timeout: float = 1.0) -> str | None:
-    try:
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=timeout)
-        writer.write(f"HEAD / HTTP/1.0\r\nHost: {ip}\r\n\r\n".encode())
-        await writer.drain()
-        headers = await asyncio.wait_for(reader.read(2048), timeout=timeout)
-        writer.close()
-        await writer.wait_closed()
-        match = re.search(r"^Server:\s*(.+)$", headers.decode("utf-8", errors="ignore"), re.MULTILINE | re.IGNORECASE)
-        return match.group(1).strip() if match else None
-    except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
-        return None
+    return await read_http_server_header(ip, port, timeout=timeout)
 
 
 def _pick_best(candidates: list[OsDetection]) -> OsDetection | None:
@@ -219,6 +203,12 @@ async def detect_os(
             candidates.append(_parse_http_server(server))
 
     best = _pick_best(candidates)
+    open_port_tuple = tuple(sorted(set(open_ports)))
     if best is None:
-        return OsDetection(os=None, detail=None, confidence="low")
-    return best
+        return OsDetection(os=None, detail=None, confidence="low", open_ports=open_port_tuple)
+    return OsDetection(
+        os=best.os,
+        detail=best.detail,
+        confidence=best.confidence,
+        open_ports=open_port_tuple,
+    )
